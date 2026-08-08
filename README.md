@@ -1,5 +1,7 @@
 # Parallel-LU
 
+> **MSc Computer Engineering course project.** This repository is kept public as supporting coursework demonstrating parallel/distributed-computing concepts in C++ rather than as a flagship or production project.
+
 Distributed LU factorization with partial pivoting, implemented in C++17 with two inter-process communication paths:
 
 - a custom TCP-based MPI-lite driver/worker layer; and
@@ -7,7 +9,7 @@ Distributed LU factorization with partial pivoting, implemented in C++17 with tw
 
 OpenMP is used for intra-process parallelism. Dense matrices are distributed by block rows, with pivot selection, row exchange, elimination, verification, timing, and optional benchmark logging built into the executables.
 
-## What the project demonstrates
+## What the project explores
 
 - distributed dense-matrix decomposition;
 - partial pivoting and row-swap coordination;
@@ -156,6 +158,7 @@ A weighted checksum of the first solved values is also emitted as a lightweight 
 
 ## Current boundaries
 
+- This is coursework rather than a production or maintained HPC library.
 - The codebase is Windows/MS-MPI oriented rather than cross-platform.
 - Dense storage and factorization remain `O(N²)` in memory footprint per relevant process allocation.
 - Benchmark results depend heavily on matrix size, process layout, network conditions, and OpenMP configuration, so this repository does not claim a universal speedup.
