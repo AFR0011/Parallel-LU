@@ -1,8 +1,9 @@
 // lu_driver.cpp - MPI-lite driver/orchestrator
 //
 // Usage:
-//   lu_driver.exe N --hosts hosts.txt [seed] [--matrix ...] [--alpha a] [--beta b] [--eps e]
-//                 [--threads T] [--timing] [--verify] [--csv out.csv]
+//   lu_driver.exe N (--serial | --hosts hosts.txt) [seed] [--matrix ...]
+//                 [--alpha a] [--beta b] [--eps e] [--threads T]
+//                 [--timing] [--verify] [--residual-tol R] [--csv out.csv]
 //
 // hosts.txt: one "IP:port" (or hostname:port) per line, empty lines and #comments allowed.
 //
@@ -141,7 +142,7 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
             "N,p,threads,seed,matrix,alpha,beta,eps,"
             "T_total,T_pivot,T_swap,T_getpivot,T_bcast_send,T_elim,T_gather,T_solve,"
             "swap_total,swap_cross,swap_bytes,bcast_bytes_sent,"
-            "rel_resid,checksum,critical_fact");
+            "rel_resid,residual_tol,verification_passed,checksum,critical_fact");
     }
 
     // Driver-side timing (mirrors the parallel driver fields; comm-related fields are 0)
@@ -186,7 +187,7 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
         double t1 = omp_get_wtime();
         t_pivot += (t1 - t0);
 
-        if (best_gi < 0 || best == 0.0) {
+        if (best_gi < 0 || best == 0.0 || !std::isfinite(best)) {
             throw std::runtime_error("Matrix appears singular at k=" + std::to_string(k) + " (best pivot=0).");
         }
 
@@ -204,8 +205,8 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
 
         // Elimination step
         double pivot = Aat_full(LU, n, k, k);
-        if (pivot == 0.0) {
-            throw std::runtime_error("Matrix appears singular at k=" + std::to_string(k) + " (pivot=0).");
+        if (pivot == 0.0 || !std::isfinite(pivot)) {
+            throw std::runtime_error("Matrix appears singular or non-finite at k=" + std::to_string(k) + ".");
         }
 
         const double* prow = &LU[(size_t)k * (size_t)n];
@@ -216,7 +217,6 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
             double* rowi = &LU[(size_t)i * (size_t)n];
             double aik = rowi[(size_t)k] / pivot;
             rowi[(size_t)k] = aik; // store L
-#pragma omp simd
             for (int j = k + 1; j < n; ++j) {
                 rowi[(size_t)j] -= aik * prow[(size_t)j];
             }
@@ -234,6 +234,11 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
     double ts1 = omp_get_wtime();
     t_solve += (ts1 - ts0);
 
+    const size_t lu_non_finite = count_non_finite(LU);
+    const size_t x_non_finite = count_non_finite(x);
+    if (lu_non_finite != 0 || x_non_finite != 0) {
+        throw std::runtime_error("Non-finite values detected in LU or solution.");
+    }
     double chk = checksum_weighted_first100(x);
 
     std::cout << "LU factorization wall time (driver): " << std::setprecision(6) << t_fact << " s\n";
@@ -259,6 +264,7 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
     }
 
     double rel = 0.0;
+    bool verification_failed = false;
     if (opt.verify) {
         double rinf = 0.0, binf = 0.0, rrel = 0.0;
         compute_residual_inf_norms(n, opt.seed, ms, x, rinf, binf, rrel);
@@ -267,6 +273,10 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
         std::cout << "  ||Ax-b||_inf: " << std::setprecision(12) << rinf << "\n";
         std::cout << "  ||b||_inf:    " << std::setprecision(12) << binf << "\n";
         std::cout << "  rel residual: " << std::setprecision(12) << rrel << "\n";
+        std::cout << "  non-finite LU/solution values: " << lu_non_finite << "/" << x_non_finite << "\n";
+        verification_failed = !std::isfinite(rrel) || rrel > opt.residual_tol;
+        std::cout << "  tolerance:    " << std::setprecision(12) << opt.residual_tol << "\n";
+        std::cout << "  status:       " << (verification_failed ? "FAILED" : "PASSED") << "\n";
     }
 
     if (!opt.csv_path.empty()) {
@@ -276,7 +286,9 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
             << t_fact << "," << t_pivot << "," << t_swap << "," << t_getpivot << "," << t_bcast_send << "," << t_elim << ","
             << t_gather << "," << t_solve << ","
             << swap_total << "," << swap_cross << "," << swap_bytes << "," << bcast_bytes_sent << ","
-            << rel << "," << chk << "," << t_fact; // critical_fact == t_fact (no workers)
+            << rel << "," << opt.residual_tol << ","
+            << (opt.verify ? (verification_failed ? 0 : 1) : -1) << ","
+            << chk << "," << t_fact; // critical_fact == t_fact (no workers)
         csv_append_line(opt.csv_path, line.str());
     }
 
@@ -284,7 +296,7 @@ static int run_serial_baseline(const RunOptions& opt, int n, const MatrixSpec& m
         std::cout << "\nEstimated critical-path factorization time: " << t_fact << " s\n";
     }
 
-    return 0;
+    return verification_failed ? 3 : 0;
 }
 
 int main(int argc, char** argv) {
@@ -303,13 +315,30 @@ int main(int argc, char** argv) {
     try {
         net::WSAInit wsa;
 
-        // Load hosts and connect
-        auto hosts = read_hosts_file(opt.hosts_path);
-        // If hosts.txt is empty, run a local serial baseline (0 workers).
-        if (hosts.empty()) {
+        if (opt.serial) {
             return run_serial_baseline(opt, n, ms);
         }
+
+        // Load hosts and connect
+        auto hosts = read_hosts_file(opt.hosts_path);
+        if (hosts.empty()) {
+            throw std::runtime_error("Hosts file is empty; use --serial for the local baseline.");
+        }
         const int p = (int)hosts.size();
+        if (p > n) {
+            throw std::runtime_error("Worker count cannot exceed matrix dimension N.");
+        }
+        const uint64_t max_rows = (uint64_t)(n + p - 1) / (uint64_t)p;
+        const uint64_t block_payload =
+            2u * sizeof(int32_t) +
+            max_rows * (uint64_t)n * sizeof(double) +
+            max_rows * sizeof(double);
+        if (block_payload + 4u > net::kMaxFrameBytes) {
+            throw std::runtime_error(
+                "Largest returned worker block exceeds the 64 MiB protocol frame limit; "
+                "use more workers or a smaller N."
+            );
+        }
 
         std::vector<WorkerConn> conns((size_t)p);
         for (int r = 0; r < p; ++r) {
@@ -383,7 +412,7 @@ int main(int argc, char** argv) {
                 "N,p,threads,seed,matrix,alpha,beta,eps,"
                 "T_total,T_pivot,T_swap,T_getpivot,T_bcast_send,T_elim,T_gather,T_solve,"
                 "swap_total,swap_cross,swap_bytes,bcast_bytes_sent,"
-                "rel_resid,checksum,critical_fact");
+                "rel_resid,residual_tol,verification_passed,checksum,critical_fact");
         }
 
         // Timing (driver-side)
@@ -435,7 +464,7 @@ int main(int argc, char** argv) {
             double t1 = omp_get_wtime();
             t_pivot += (t1 - t0);
 
-            if (best_gi < 0 || best == 0.0) {
+            if (best_gi < 0 || best == 0.0 || !std::isfinite(best)) {
                 throw std::runtime_error("Matrix appears singular at k=" + std::to_string(k) + " (best pivot=0).");
             }
 
@@ -503,6 +532,9 @@ int main(int argc, char** argv) {
                 int tail_len = r.pod<int32_t>();
                 if (kk != k) throw std::runtime_error("GET_PIVOT_TAIL: k mismatch");
                 if (tail_len != n - (k + 1)) throw std::runtime_error("GET_PIVOT_TAIL: tail_len mismatch");
+                if (pivot == 0.0 || !std::isfinite(pivot)) {
+                    throw std::runtime_error("Worker returned a zero or non-finite pivot.");
+                }
                 if (tail_len > 0) r.bytes(&tail[(size_t)k + 1], (size_t)tail_len * sizeof(double));
 
                 t1 = omp_get_wtime();
@@ -576,6 +608,11 @@ int main(int argc, char** argv) {
         double ts1 = omp_get_wtime();
         t_solve += (ts1 - ts0);
 
+        const size_t lu_non_finite = count_non_finite(LU);
+        const size_t x_non_finite = count_non_finite(x);
+        if (lu_non_finite != 0 || x_non_finite != 0) {
+            throw std::runtime_error("Non-finite values detected in LU or solution.");
+        }
         double chk = checksum_weighted_first100(x);
 
         std::cout << "LU factorization wall time (driver): " << std::setprecision(6) << t_fact << " s\n";
@@ -601,6 +638,7 @@ int main(int argc, char** argv) {
         }
 
         double rel = 0.0;
+        bool verification_failed = false;
         if (opt.verify) {
             double rinf = 0.0, binf = 0.0, rrel = 0.0;
             compute_residual_inf_norms(n, opt.seed, ms, x, rinf, binf, rrel);
@@ -609,6 +647,10 @@ int main(int argc, char** argv) {
             std::cout << "  ||Ax-b||_inf: " << std::setprecision(12) << rinf << "\n";
             std::cout << "  ||b||_inf:    " << std::setprecision(12) << binf << "\n";
             std::cout << "  rel residual: " << std::setprecision(12) << rrel << "\n";
+            std::cout << "  non-finite LU/solution values: " << lu_non_finite << "/" << x_non_finite << "\n";
+            verification_failed = !std::isfinite(rrel) || rrel > opt.residual_tol;
+            std::cout << "  tolerance:    " << std::setprecision(12) << opt.residual_tol << "\n";
+            std::cout << "  status:       " << (verification_failed ? "FAILED" : "PASSED") << "\n";
         }
 
         // Pull worker stats (optional but useful)
@@ -661,7 +703,9 @@ int main(int argc, char** argv) {
                 << t_fact << "," << t_pivot << "," << t_swap << "," << t_getpivot << "," << t_bcast_send << "," << t_elim << ","
                 << t_gather << "," << t_solve << ","
                 << swap_total << "," << swap_cross << "," << swap_bytes << "," << bcast_bytes_sent << ","
-                << rel << "," << chk << ",";
+                << rel << "," << opt.residual_tol << ","
+                << (opt.verify ? (verification_failed ? 0 : 1) : -1) << ","
+                << chk << ",";
 
             // critical-path factorization estimate (max(driver, max_worker))
             double critical_fact = std::max(t_fact, max_worker);
@@ -685,7 +729,7 @@ int main(int argc, char** argv) {
             std::cout << "\nEstimated critical-path factorization time: " << critical << " s\n";
         }
 
-        return 0;
+        return verification_failed ? 3 : 0;
     }
     catch (const std::exception& e) {
         std::cerr << "lu_driver fatal: " << e.what() << "\n";

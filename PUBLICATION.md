@@ -1,23 +1,52 @@
-# Publication Notes
+# Publication and evidence notes
 
-Parallel-LU is released as a systems/HPC engineering project under the MIT License.
+Parallel-LU is published as a completed MSc systems-coursework artifact. Its
+maintained claim is deliberately narrow: small synthetic serial and two-worker
+MPI-lite runs build and pass automated correctness contracts on Windows.
 
-The repository currently demonstrates a Windows-oriented C++17 implementation of distributed LU factorization with partial pivoting using a custom TCP-based MPI-lite path, standard MS-MPI, and OpenMP.
+## Supported public claims
 
-## Current scope
+- deterministic dense matrix generation;
+- partial-pivot LU/Gaussian elimination;
+- explicit serial and custom TCP driver/worker paths;
+- block-row distribution and cross-worker row exchange;
+- OpenMP local elimination;
+- versioned, capped, timeout-bounded native-POD frames for a homogeneous trusted
+  environment;
+- non-finite and relative-residual pass/fail verification;
+- warning-clean MSVC build and Windows CI;
+- timing, communication counters, checksums, and optional generated CSV output.
 
-- custom driver/worker TCP communication;
-- standard MPI execution;
-- OpenMP intra-process parallelism;
-- block-row distribution;
-- partial pivoting and row exchange;
-- deterministic matrix generation;
-- residual and NaN/Inf verification;
-- timing and load diagnostics;
-- optional CSV benchmark output.
+## Claims not established
 
-## Presentation guidance
+- universal or production-scale speedup;
+- secure use on untrusted networks;
+- portable interoperability across architectures or operating systems;
+- worker-failure recovery or malicious-peer resistance;
+- Linux/OpenMPI support;
+- numerical equivalence to a trusted BLAS/LAPACK implementation across a broad
+  condition-number range;
+- successful build or execution of the optional `lu_mpi.cpp` MS-MPI path.
 
-Benchmark results should always include the matrix size, process count, thread count, communication mode, and hardware/network context. The project does not claim a universal parallel speedup.
+The MS-MPI source is implemented but unverified in the coursework release. The
+archived duplicate coordinator is not a supported target.
 
-A future portability pass could add CMake, Linux/OpenMPI support, automated correctness tests, and reproducible benchmark plots. Those are useful extensions rather than prerequisites for understanding the current implementation.
+## Benchmark reporting rule
+
+Any future performance result must record the exact commit, compiler and flags,
+matrix mode/size/seed, process and OpenMP thread counts, machine specifications,
+network topology, repeated-run protocol, raw outputs, and aggregation method.
+Until such evidence is reviewed, this repository does not claim a universal
+speedup and publishes no benchmark plot.
+
+## Release verification
+
+The reviewed coursework release requires:
+
+1. CMake configure and `/W4 /permissive- /WX` build;
+2. common numerical/CLI/frame contract tests;
+3. deterministic serial success and singular-case failure;
+4. two-worker loopback agreement with cross-worker swaps;
+5. publication-boundary and credential scans;
+6. green public GitHub Actions for the release commit;
+7. an exact-SHA fresh public clone rerun.

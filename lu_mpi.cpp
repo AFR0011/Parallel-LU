@@ -676,8 +676,7 @@ int main(int argc, char** argv) {
                Aat(A, n, li, k) = aik; // store L factor
 
                double* rowp = &A[(size_t)li * (size_t)n];
-#pragma omp simd
-               for (int j = k + 1; j < n; ++j) {
+       for (int j = k + 1; j < n; ++j) {
                    rowp[(size_t)j] -= aik * pivot_row[(size_t)j];
                }
            }

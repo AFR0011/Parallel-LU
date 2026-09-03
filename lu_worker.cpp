@@ -1,7 +1,7 @@
 // lu_worker.cpp - MPI-lite worker process
 //
 // Usage (run on every compute node):
-//   lu_worker.exe --listen 0.0.0.0:5000
+//   lu_worker.exe --listen 127.0.0.1:5000 --threads 4
 //
 // The worker holds a block of rows [row0, row0+rows) and performs OpenMP elimination steps
 // on command from the driver.
@@ -10,6 +10,7 @@
 //  - With --keep-workers on the driver, the driver will close the TCP connection after a run.
 //    That is normal. The worker must treat "peer closed connection" as "session ended" and
 //    return to accept() for the next run.
+//  - The native-POD protocol is for loopback or a homogeneous trusted lab network only.
 
 #include "lu_common.h"
 #include "lu_net.h"
@@ -96,6 +97,16 @@ static bool handle_message(SOCKET s, WorkerState& st, net::Msg type, const std::
             st.ms.beta = r.pod<double>();
             st.ms.eps = r.pod<double>();
             st.threads = r.pod<int32_t>();
+
+            if (st.n < 1 || st.n > kMaxMatrixN || st.p < 1 || st.rank < 0 ||
+                st.rank >= st.p || st.row0 < 0 || st.row0 > st.n ||
+                st.rows < 0 || st.rows > st.n || st.rows > st.n - st.row0 || st.threads < 0 ||
+                st.threads > kMaxThreads || !std::isfinite(st.ms.alpha) ||
+                !std::isfinite(st.ms.beta) || !std::isfinite(st.ms.eps) ||
+                st.ms.eps < 0.0) {
+                send_err(s, "INIT contains invalid dimensions, parameters, or thread count.");
+                return true;
+            }
 
             if (st.threads > 0) omp_set_num_threads(st.threads);
 
@@ -241,8 +252,8 @@ static bool handle_message(SOCKET s, WorkerState& st, net::Msg type, const std::
                 return true;
             }
             double pivot = st.cur_pivot;
-            if (pivot == 0.0) {
-                send_err(s, "ELIMINATE: pivot is zero");
+            if (pivot == 0.0 || !std::isfinite(pivot)) {
+                send_err(s, "ELIMINATE: pivot is zero or non-finite");
                 return true;
             }
 
@@ -257,7 +268,6 @@ static bool handle_message(SOCKET s, WorkerState& st, net::Msg type, const std::
                     Aat(st.A, st.n, li, k) = aik; // store L
 
                     double* rowp = &st.A[(size_t)li * (size_t)st.n];
-#pragma omp simd
                     for (int j = k + 1; j < st.n; ++j) {
                         rowp[(size_t)j] -= aik * st.pivot_tail[(size_t)j];
                     }

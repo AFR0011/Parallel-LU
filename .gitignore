@@ -1,0 +1,19 @@
+# CMake and compiler output
+/build/
+/out/
+/.vs/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# Generated experiment output
+*.csv
+*.log
+hosts*.txt
+
+# Python test caches
+__pycache__/
+*.py[cod]

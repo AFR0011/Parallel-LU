@@ -23,8 +23,13 @@
 #include <sstream>
 #include <cstring>
 #include <iostream>
+#include <limits>
 
 namespace net {
+
+constexpr uint16_t kProtocolVersion = 1;
+constexpr uint32_t kMaxFrameBytes = 64u * 1024u * 1024u;
+constexpr DWORD kSocketTimeoutMs = 30000;
 
 struct WSAInit {
     WSAInit() {
@@ -51,6 +56,7 @@ inline void send_all(SOCKET s, const void* data, size_t n) {
     while (n > 0) {
         int sent = ::send(s, p, (int)std::min<size_t>(n, 1u<<30), 0);
         if (sent == SOCKET_ERROR) throw std::runtime_error(last_error("send"));
+        if (sent == 0) throw std::runtime_error("send failed: zero bytes written");
         p += sent;
         n -= (size_t)sent;
     }
@@ -70,6 +76,21 @@ inline void recv_all(SOCKET s, void* data, size_t n) {
 inline void set_nodelay(SOCKET s, bool on=true) {
     int flag = on ? 1 : 0;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
+}
+
+inline void set_io_timeouts(SOCKET s, DWORD timeout_ms = kSocketTimeoutMs) {
+    if (setsockopt(
+            s, SOL_SOCKET, SO_RCVTIMEO,
+            reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)
+        ) == SOCKET_ERROR) {
+        throw std::runtime_error(last_error("setsockopt(SO_RCVTIMEO)"));
+    }
+    if (setsockopt(
+            s, SOL_SOCKET, SO_SNDTIMEO,
+            reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)
+        ) == SOCKET_ERROR) {
+        throw std::runtime_error(last_error("setsockopt(SO_SNDTIMEO)"));
+    }
 }
 
 inline SOCKET connect_tcp(const std::string& host, uint16_t port) {
@@ -96,6 +117,7 @@ inline SOCKET connect_tcp(const std::string& host, uint16_t port) {
     freeaddrinfo(res);
     if (s == INVALID_SOCKET) throw std::runtime_error("connect failed to " + host + ":" + port_str);
     set_nodelay(s, true);
+    set_io_timeouts(s);
     return s;
 }
 
@@ -135,6 +157,7 @@ inline SOCKET listen_and_accept(const std::string& bind_ip, uint16_t port) {
     closesocket_safe(ls);
     if (cs == INVALID_SOCKET) throw std::runtime_error(last_error("accept"));
     set_nodelay(cs, true);
+    set_io_timeouts(cs);
     return cs;
 }
 
@@ -190,10 +213,18 @@ struct ByteReader {
 };
 
 // Frame: uint32 payload_bytes, then uint16 msg, uint16 reserved, then payload.
+inline void validate_payload_size(size_t payload_size) {
+    if (payload_size > (size_t)kMaxFrameBytes - 4u ||
+        payload_size > (size_t)std::numeric_limits<uint32_t>::max() - 4u) {
+        throw std::runtime_error("Message payload exceeds the 64 MiB frame limit");
+    }
+}
+
 inline void send_msg(SOCKET s, Msg type, const std::vector<uint8_t>& payload) {
+    validate_payload_size(payload.size());
     uint32_t payload_bytes = (uint32_t)(payload.size() + 4); // msg+reserved included in payload area
     uint16_t t = (uint16_t)type;
-    uint16_t rsv = 0;
+    uint16_t rsv = kProtocolVersion;
     send_all(s, &payload_bytes, sizeof(payload_bytes));
     send_all(s, &t, sizeof(t));
     send_all(s, &rsv, sizeof(rsv));
@@ -204,10 +235,15 @@ inline void recv_msg(SOCKET s, Msg& type_out, std::vector<uint8_t>& payload_out)
     uint32_t payload_bytes = 0;
     recv_all(s, &payload_bytes, sizeof(payload_bytes));
     if (payload_bytes < 4) throw std::runtime_error("Bad frame: payload_bytes<4");
+    if (payload_bytes > kMaxFrameBytes) {
+        throw std::runtime_error("Bad frame: payload exceeds the 64 MiB limit");
+    }
     uint16_t t=0, rsv=0;
     recv_all(s, &t, sizeof(t));
     recv_all(s, &rsv, sizeof(rsv));
-    (void)rsv;
+    if (rsv != kProtocolVersion) {
+        throw std::runtime_error("Bad frame: incompatible protocol version");
+    }
     type_out = (Msg)t;
     payload_out.resize(payload_bytes - 4);
     if (!payload_out.empty()) recv_all(s, payload_out.data(), payload_out.size());
@@ -215,8 +251,15 @@ inline void recv_msg(SOCKET s, Msg& type_out, std::vector<uint8_t>& payload_out)
 
 inline std::pair<std::string,uint16_t> parse_hostport(const std::string& s) {
     auto pos = s.find(':');
-    if (pos == std::string::npos) return {s, 0};
-    return {s.substr(0,pos), (uint16_t)std::stoi(s.substr(pos+1))};
+    if (pos == std::string::npos || pos == 0 || pos != s.rfind(':')) {
+        throw std::runtime_error("Host entry must use hostname-or-IPv4:port: " + s);
+    }
+    size_t consumed = 0;
+    unsigned long port = std::stoul(s.substr(pos + 1), &consumed);
+    if (consumed != s.size() - pos - 1 || port < 1 || port > 65535) {
+        throw std::runtime_error("Host port must be between 1 and 65535: " + s);
+    }
+    return {s.substr(0,pos), (uint16_t)port};
 }
 
 } // namespace net

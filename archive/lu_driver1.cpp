@@ -1,3 +1,9 @@
+// HISTORICAL MPI-LITE DRIVER VARIANT - NOT BUILT OR SUPPORTED.
+//
+// This duplicate coordinator is preserved for project history. It drifted from
+// the canonical lu_driver.cpp and does not implement that driver's serial path.
+// Use the root-level lu_driver.cpp and lu_worker.cpp targets instead.
+//
 // lu_driver.cpp - MPI-lite driver/orchestrator
 //
 // Usage:

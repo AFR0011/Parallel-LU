@@ -11,6 +11,10 @@
 #include <cstdio>
 #include <cstdlib>
 
+constexpr int kMaxMatrixN = 8192;
+constexpr int kMaxThreads = 256;
+constexpr double kDefaultResidualTolerance = 1e-10;
+
 enum class MatrixMode {
     DiagDominant,
     WeakDiagDominant,
@@ -89,6 +93,7 @@ void solve_on_root_inplace_LU(
 // ---------------------- Output helpers ----------------------
 
 double checksum_weighted_first100(const std::vector<double>& x);
+size_t count_non_finite(const std::vector<double>& values);
 
 struct RunOptions {
     // Driver options
@@ -110,11 +115,13 @@ struct RunOptions {
 
     bool timing = false;
     bool verify = false;
+    double residual_tol = kDefaultResidualTolerance;
 
     int threads = 0; // if 0, don't set OMP from driver (workers can use INIT threads)
     std::string csv_path;
 
-    std::string hosts_path; // required for driver
+    bool serial = false;
+    std::string hosts_path;
 
 	int keep_workers = 0; // for driver: if non-zero, don't shutdown workers on completions
 };
@@ -123,7 +130,7 @@ bool parse_driver_args(int argc, char** argv, RunOptions& opt, std::string& err)
 
 // worker CLI
 struct WorkerOptions {
-    std::string bind_ip = "0.0.0.0";
+    std::string bind_ip = "127.0.0.1";
     uint16_t port = 5000;
     int threads = 0; // optional default
 };

@@ -183,7 +183,13 @@ void solve_on_root_inplace_LU(
         double sum = y[(size_t)i];
         for (int j = i + 1; j < n; ++j) sum -= row[(size_t)j] * x_out[(size_t)j];
         double diag = row[(size_t)i];
-        x_out[(size_t)i] = (diag != 0.0) ? (sum / diag) : 0.0;
+        if (diag == 0.0 || !std::isfinite(diag)) {
+            throw std::runtime_error(
+                "Invalid diagonal during back substitution at row " +
+                std::to_string(i)
+            );
+        }
+        x_out[(size_t)i] = sum / diag;
     }
 }
 
@@ -194,6 +200,12 @@ double checksum_weighted_first100(const std::vector<double>& x) {
     return s;
 }
 
+size_t count_non_finite(const std::vector<double>& values) {
+    return (size_t)std::count_if(
+        values.begin(), values.end(), [](double value) { return !std::isfinite(value); }
+    );
+}
+
 // ---------------------- Arg parsing ----------------------
 
 static bool is_flag(const char* s) {
@@ -202,8 +214,10 @@ static bool is_flag(const char* s) {
 
 bool parse_driver_args(int argc, char** argv, RunOptions& opt, std::string& err) {
     if (argc < 2) {
-        err = "Usage: lu_driver.exe N --hosts hosts.txt [seed] [--matrix dd|weakdd|rand|near_singular] "
-              "[--alpha a] [--beta b] [--eps e] [--threads T] [--timing] [--verify] [--csv path]";
+        err = "Usage: lu_driver.exe N (--serial | --hosts hosts.txt) [seed] "
+              "[--matrix dd|weakdd|rand|near_singular] [--alpha a] [--beta b] "
+              "[--eps e] [--threads T] [--timing] [--verify] "
+              "[--residual-tol R] [--csv path]";
         return false;
     }
 
@@ -213,60 +227,81 @@ bool parse_driver_args(int argc, char** argv, RunOptions& opt, std::string& err)
         err = "Error: N must be an integer.";
         return false;
     }
-    if (opt.n <= 0) { err = "Error: N must be > 0."; return false; }
-
-    int i = 2;
-    if (i < argc && !is_flag(argv[i])) {
-        opt.seed = (uint64_t)std::stoull(argv[i]);
-        ++i;
+    if (opt.n <= 0 || opt.n > kMaxMatrixN) {
+        err = "Error: N must be between 1 and " + std::to_string(kMaxMatrixN) + ".";
+        return false;
     }
 
-    for (; i < argc; ++i) {
-        std::string a = argv[i];
-        auto need = [&](const char* name) -> const char* {
-            if (i + 1 >= argc) {
-                err = std::string("Error: missing value for ") + name;
-                return nullptr;
-            }
-            return argv[++i];
-        };
-
-        if (a == "--hosts") {
-            const char* v = need("--hosts"); if (!v) return false;
-            opt.hosts_path = v;
-        } else if (a == "--matrix") {
-            const char* v = need("--matrix"); if (!v) return false;
-            MatrixMode m;
-            if (!parse_mode(v, m)) { err = "Error: bad --matrix value."; return false; }
-            opt.mode = m;
-        } else if (a == "--alpha") {
-            const char* v = need("--alpha"); if (!v) return false;
-            opt.alpha = std::stod(v); opt.alpha_set = true;
-        } else if (a == "--beta") {
-            const char* v = need("--beta"); if (!v) return false;
-            opt.beta = std::stod(v); opt.beta_set = true;
-        } else if (a == "--eps") {
-            const char* v = need("--eps"); if (!v) return false;
-            opt.eps = std::stod(v); opt.eps_set = true;
-        } else if (a == "--threads") {
-            const char* v = need("--threads"); if (!v) return false;
-            opt.threads = std::stoi(v);
-        } else if (a == "--timing") {
-            opt.timing = true;
-        } else if (a == "--verify") {
-            opt.verify = true;
-        } else if (a == "--csv") {
-            const char* v = need("--csv"); if (!v) return false;
-            opt.csv_path = v;
-        } else if (a == "--seed") {
-            const char* v = need("--seed"); if (!v) return false;
-            opt.seed = (uint64_t)std::stoull(v);
-        } else if (a == "--keep-workers") {
-            opt.keep_workers = 1;
-        } else {
-            err = "Error: unknown option: " + a;
-            return false;
+    int i = 2;
+    try {
+        if (i < argc && !is_flag(argv[i])) {
+            opt.seed = (uint64_t)std::stoull(argv[i]);
+            ++i;
         }
+    } catch (const std::exception&) {
+        err = "Error: seed must be an unsigned integer.";
+        return false;
+    }
+
+    try {
+        for (; i < argc; ++i) {
+            std::string a = argv[i];
+            auto need = [&](const char* name) -> const char* {
+                if (i + 1 >= argc) {
+                    err = std::string("Error: missing value for ") + name;
+                    return nullptr;
+                }
+                return argv[++i];
+            };
+
+            if (a == "--serial") {
+                opt.serial = true;
+            } else if (a == "--hosts") {
+                const char* v = need("--hosts"); if (!v) return false;
+                opt.hosts_path = v;
+            } else if (a == "--matrix") {
+                const char* v = need("--matrix"); if (!v) return false;
+                MatrixMode m;
+                if (!parse_mode(v, m)) { err = "Error: bad --matrix value."; return false; }
+                opt.mode = m;
+            } else if (a == "--alpha") {
+                const char* v = need("--alpha"); if (!v) return false;
+                opt.alpha = std::stod(v); opt.alpha_set = true;
+            } else if (a == "--beta") {
+                const char* v = need("--beta"); if (!v) return false;
+                opt.beta = std::stod(v); opt.beta_set = true;
+            } else if (a == "--eps") {
+                const char* v = need("--eps"); if (!v) return false;
+                opt.eps = std::stod(v); opt.eps_set = true;
+            } else if (a == "--threads") {
+                const char* v = need("--threads"); if (!v) return false;
+                opt.threads = std::stoi(v);
+            } else if (a == "--timing") {
+                opt.timing = true;
+            } else if (a == "--verify") {
+                opt.verify = true;
+            } else if (a == "--residual-tol") {
+                const char* v = need("--residual-tol"); if (!v) return false;
+                opt.residual_tol = std::stod(v);
+            } else if (a == "--csv") {
+                const char* v = need("--csv"); if (!v) return false;
+                opt.csv_path = v;
+            } else if (a == "--seed") {
+                const char* v = need("--seed"); if (!v) return false;
+                opt.seed = (uint64_t)std::stoull(v);
+            } else if (a == "--keep-workers") {
+                opt.keep_workers = 1;
+            } else if (a == "--help" || a == "-h") {
+                err = "Usage: lu_driver.exe N (--serial | --hosts hosts.txt) [options]";
+                return false;
+            } else {
+                err = "Error: unknown option: " + a;
+                return false;
+            }
+        }
+    } catch (const std::exception&) {
+        err = "Error: invalid numeric option value.";
+        return false;
     }
 
     // defaults aligned with lu_final.cpp
@@ -281,8 +316,25 @@ bool parse_driver_args(int argc, char** argv, RunOptions& opt, std::string& err)
     }
     if (!opt.eps_set) opt.eps = 1e-3;
 
-    if (opt.hosts_path.empty()) {
-        err = "Error: --hosts is required for lu_driver.exe";
+    if (!std::isfinite(opt.alpha) || !std::isfinite(opt.beta) ||
+        !std::isfinite(opt.eps) || opt.eps < 0.0) {
+        err = "Error: alpha/beta must be finite and eps must be finite and >= 0.";
+        return false;
+    }
+    if (opt.threads < 0 || opt.threads > kMaxThreads) {
+        err = "Error: --threads must be between 0 and " + std::to_string(kMaxThreads) + ".";
+        return false;
+    }
+    if (!std::isfinite(opt.residual_tol) || opt.residual_tol <= 0.0) {
+        err = "Error: --residual-tol must be finite and > 0.";
+        return false;
+    }
+    if (opt.serial && !opt.hosts_path.empty()) {
+        err = "Error: choose either --serial or --hosts, not both.";
+        return false;
+    }
+    if (!opt.serial && opt.hosts_path.empty()) {
+        err = "Error: choose --serial or provide --hosts for lu_driver.exe.";
         return false;
     }
     return true;
@@ -290,30 +342,48 @@ bool parse_driver_args(int argc, char** argv, RunOptions& opt, std::string& err)
 
 bool parse_worker_args(int argc, char** argv, WorkerOptions& opt, std::string& err) {
     // Usage: lu_worker.exe [--listen ip:port] [--threads T]
-    for (int i = 1; i < argc; ++i) {
-        std::string a = argv[i];
-        auto need = [&](const char* name) -> const char* {
-            if (i + 1 >= argc) { err = std::string("Error: missing value for ") + name; return nullptr; }
-            return argv[++i];
-        };
+    try {
+        for (int i = 1; i < argc; ++i) {
+            std::string a = argv[i];
+            auto need = [&](const char* name) -> const char* {
+                if (i + 1 >= argc) { err = std::string("Error: missing value for ") + name; return nullptr; }
+                return argv[++i];
+            };
 
-        if (a == "--listen") {
-            const char* v = need("--listen"); if (!v) return false;
-            std::string s = v;
-            auto pos = s.find(':');
-            if (pos == std::string::npos) { err = "Error: --listen must be ip:port"; return false; }
-            opt.bind_ip = s.substr(0, pos);
-            opt.port = (uint16_t)std::stoi(s.substr(pos + 1));
-        } else if (a == "--threads") {
-            const char* v = need("--threads"); if (!v) return false;
-            opt.threads = std::stoi(v);
-        } else if (a == "--help" || a == "-h") {
-            err = "Usage: lu_worker.exe [--listen ip:port] [--threads T]";
-            return false;
-        } else {
-            err = "Error: unknown option: " + a;
-            return false;
+            if (a == "--listen") {
+                const char* v = need("--listen"); if (!v) return false;
+                std::string s = v;
+                auto pos = s.find(':');
+                if (pos == std::string::npos || pos == 0 || pos != s.rfind(':')) {
+                    err = "Error: --listen must be hostname-or-IPv4:port";
+                    return false;
+                }
+                opt.bind_ip = s.substr(0, pos);
+                size_t consumed = 0;
+                int port = std::stoi(s.substr(pos + 1), &consumed);
+                if (consumed != s.size() - pos - 1 || port < 1 || port > 65535) {
+                    err = "Error: --listen requires a non-empty IPv4/hostname and port 1-65535";
+                    return false;
+                }
+                opt.port = (uint16_t)port;
+            } else if (a == "--threads") {
+                const char* v = need("--threads"); if (!v) return false;
+                opt.threads = std::stoi(v);
+            } else if (a == "--help" || a == "-h") {
+                err = "Usage: lu_worker.exe [--listen ip:port] [--threads T]";
+                return false;
+            } else {
+                err = "Error: unknown option: " + a;
+                return false;
+            }
         }
+    } catch (const std::exception&) {
+        err = "Error: invalid numeric worker option value.";
+        return false;
+    }
+    if (opt.threads < 0 || opt.threads > kMaxThreads) {
+        err = "Error: --threads must be between 0 and " + std::to_string(kMaxThreads) + ".";
+        return false;
     }
     return true;
 }

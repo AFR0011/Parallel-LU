@@ -1,169 +1,194 @@
 # Parallel-LU
 
-> **MSc Computer Engineering course project.** This repository is kept public as supporting coursework demonstrating parallel/distributed-computing concepts in C++ rather than as a flagship or production project.
+[![Windows CI](https://github.com/AFR0011/Parallel-LU/actions/workflows/ci.yml/badge.svg)](https://github.com/AFR0011/Parallel-LU/actions/workflows/ci.yml)
 
-Distributed LU factorization with partial pivoting, implemented in C++17 with two inter-process communication paths:
+An MSc Computer Engineering course project exploring dense LU/Gaussian
+elimination with partial pivoting in C++17. The maintained path compares a local
+serial baseline with a custom Windows TCP driver/worker implementation and uses
+OpenMP for elimination within each process.
 
-- a custom TCP-based MPI-lite driver/worker layer; and
-- a standard MS-MPI implementation.
+![Synthetic architecture diagram](docs/parallel-lu-architecture.svg)
 
-OpenMP is used for intra-process parallelism. Dense matrices are distributed by block rows, with pivot selection, row exchange, elimination, verification, timing, and optional benchmark logging built into the executables.
+This is supporting systems coursework, not a production HPC library or secure
+cluster service. It does not claim a universal speedup.
 
-## What the project explores
+## Verified scope
 
-- distributed dense-matrix decomposition;
-- partial pivoting and row-swap coordination;
-- custom TCP message transport using Winsock2;
-- standard MPI collective/process communication;
-- OpenMP intra-node parallelism;
-- deterministic matrix generation for repeatable experiments;
-- residual-based correctness checks and NaN/Inf detection;
-- timing, pivot, and load-imbalance diagnostics;
-- CSV benchmark output;
-- serial and distributed execution paths.
+The reproducible, CI-tested surface is:
 
-## Programs
+- `lu_driver.cpp` — one canonical coordinator with explicit `--serial` and
+  `--hosts` modes;
+- `lu_worker.cpp` — block-row worker for the MPI-lite TCP path;
+- `lu_common.cpp/.h` — deterministic matrix generation, distribution, solve,
+  residual, and CLI helpers;
+- `lu_net.h` — bounded Winsock2 message transport;
+- `tests/` — synthetic numerical, argument, frame, serial, and two-worker
+  loopback checks.
 
-| Program | Purpose |
-| --- | --- |
-| `lu_driver.cpp` | MPI-lite coordinator for TCP workers |
-| `lu_driver1.cpp` | MPI-lite coordinator with serial fallback/baseline |
-| `lu_worker.cpp` | MPI-lite worker process |
-| `lu_mpi.cpp` | Standard MPI implementation |
-| `lu_common.cpp/.h` | Shared matrix generation, distribution, solving, and verification helpers |
-| `lu_net.h` | TCP/Winsock2 networking helpers |
+`lu_mpi.cpp` contains a separate MS-MPI implementation. It is **implemented but
+unverified** in this release because neither the local verification environment
+nor CI installs the separate MS-MPI SDK and runtime. It is excluded from the
+default build. `archive/lu_driver1.cpp` is a superseded duplicate coordinator
+retained only as project history.
 
 ## Computation model
 
-For a dense matrix `A`, the implementation performs Gaussian elimination with partial pivoting to obtain an LU factorization while distributing matrix rows across processes.
+Dense rows are generated deterministically from a seed and distributed in
+contiguous blocks. At each elimination step, workers contribute a pivot
+candidate, the driver coordinates any row exchange, and the pivot tail is sent
+back for parallel local updates. The gathered in-place LU matrix is solved on the
+driver and checked against a regenerated `A` and `b`.
 
 ```text
-Matrix generation
-      |
-      v
-1D block-row distribution
-      |
-      v
-Pivot scan / selection
-      |
-      +--> row exchange
-      +--> pivot-row communication
-      |
-      v
-Parallel elimination
-      |
-      v
-Solve / verification
-      |
-      +--> residual checks
-      +--> timing diagnostics
-      +--> optional CSV output
+deterministic A, b
+       |
+       v
+block-row distribution
+       |
+       v
+pivot scan -> row exchange -> pivot-tail broadcast
+       |
+       v
+OpenMP elimination on local rows
+       |
+       v
+gather -> solve -> residual/non-finite verification
 ```
 
-The custom MPI-lite path uses a driver/worker topology over TCP. The standard MPI path uses MS-MPI and is launched through `mpiexec`.
-
-## Matrix modes
-
-The executables support deterministic generation modes for correctness and performance experiments:
-
-- `dd`: diagonally dominant;
-- `weakdd`: weaker configurable diagonal dominance;
-- `rand`: random dense matrix without a diagonal boost;
-- `near_singular`: near-singular construction with configurable noise.
-
-Common parameters include:
-
-```text
---alpha A
---beta B
---eps E
---seed S
---threads T
---timing
---verify
---csv PATH
-```
+Supported matrix modes are `dd`, `weakdd`, `rand`, and `near_singular`.
 
 ## Requirements
 
-The current implementation is Windows-oriented and uses:
+- Windows 10 or later;
+- Visual Studio 2022 or later with Desktop development with C++;
+- CMake 3.20 or later;
+- Python 3.12 or later for the integration test harness.
 
-- Visual Studio 2019 or later with C++17 support;
-- OpenMP;
-- Winsock2 for the MPI-lite transport;
-- Microsoft MPI for `lu_mpi.cpp`.
+The reviewed local build used Visual Studio 2026, MSVC 19.51, Windows SDK
+10.0.26100, and CMake's standard MSVC OpenMP flag. GitHub Actions independently
+builds and tests on `windows-latest`.
 
-## Build
+## Build and test
 
-### MPI-lite driver
+From a PowerShell or Developer Command Prompt:
 
-From a Visual Studio developer command prompt:
-
-```bat
-cl /std:c++17 /openmp /EHsc lu_driver.cpp lu_common.cpp /link Ws2_32.lib /out:lu_driver.exe
+```powershell
+cmake -S . -B build -A x64 -DBUILD_TESTING=ON
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
+python scripts/publication_guard.py
 ```
 
-### MPI-lite driver with serial baseline
+Maintained targets compile with `/W4 /permissive- /WX`; warnings fail the build.
+The test suite uses generated matrices and loopback processes only. It does not
+publish a scaling benchmark.
 
-```bat
-cl /std:c++17 /openmp /EHsc lu_driver1.cpp lu_common.cpp /link Ws2_32.lib /out:lu_driver1.exe
+## Serial run
+
+```powershell
+build\Release\lu_driver.exe 32 `
+  --serial `
+  --matrix rand `
+  --threads 1 `
+  --timing `
+  --verify
 ```
 
-### Worker
+`--verify` defaults to a relative-residual tolerance of `1e-10`. Override it
+explicitly when an experiment has a justified numerical contract:
 
-```bat
-cl /std:c++17 /openmp /EHsc lu_worker.cpp lu_common.cpp /link Ws2_32.lib /out:lu_worker.exe
+```powershell
+build\Release\lu_driver.exe 64 --serial --matrix dd --verify --residual-tol 1e-9
 ```
 
-### Standard MPI
+Verification returns exit code 3 when the result is non-finite or exceeds the
+tolerance. Invalid arguments return 2; runtime/protocol failures return 1.
 
-Compile `lu_mpi.cpp` with the MS-MPI include/library paths configured and link `msmpi.lib`.
+## Two-worker loopback run
 
-## Run the MPI-lite implementation
+Start each worker in a separate terminal:
 
-Create a host file containing one worker endpoint per line:
+```powershell
+build\Release\lu_worker.exe --listen 127.0.0.1:5001 --threads 1
+build\Release\lu_worker.exe --listen 127.0.0.1:5002 --threads 1
+```
+
+Create an untracked `hosts-local.txt`:
 
 ```text
-192.168.1.100:5000
-192.168.1.101:5000
+127.0.0.1:5001
+127.0.0.1:5002
 ```
 
-Start a worker on each machine:
+Run the distributed path:
 
-```bat
-lu_worker.exe --bind 0.0.0.0:5000 --threads 4
+```powershell
+build\Release\lu_driver.exe 32 `
+  --hosts hosts-local.txt `
+  --matrix rand `
+  --threads 1 `
+  --timing `
+  --verify
 ```
 
-Then run the driver:
+The integration test automates this flow, requires the serial and distributed
+checksums to agree, and uses a deterministic random case that exercises
+cross-worker row swaps.
 
-```bat
-lu_driver.exe 2000 --hosts hosts.txt --matrix weakdd --alpha 0.2 --timing --verify
+## TCP trust boundary
+
+The custom protocol is intended only for loopback or a **trusted, homogeneous
+lab network**. The wire representation uses native C++ integer and IEEE-754
+memory layouts, so every participant must use a compatible Windows build and
+protocol version.
+
+The maintained transport:
+
+- defaults workers to `127.0.0.1`;
+- limits each frame to 64 MiB before allocation;
+- marks frames with protocol version 1;
+- applies 30-second send/receive timeouts after connection;
+- validates worker endpoints and run parameters.
+
+It does not provide authentication, authorization, encryption, portable byte
+order, connect-timeout control, worker-loss recovery, or Byzantine-peer safety.
+Do not bind to a public interface or route this protocol over an untrusted
+network. See [SECURITY.md](SECURITY.md).
+
+## Limits and evidence
+
+- Matrix dimension is limited to 8192 and requested threads to 256. Available
+  memory and the per-frame limit can impose smaller practical distributed sizes.
+- Dense storage/factorization remains quadratic in matrix storage and cubic in
+  arithmetic work.
+- Residual agreement is a useful correctness signal, not proof of numerical
+  stability across all matrices.
+- No LAPACK/Eigen oracle, multi-machine failure campaign, Linux/OpenMPI path, or
+  context-complete performance study is included.
+- Timing and CSV output are instrumentation for local experiments. Generated
+  CSVs, binaries, objects, host files, and logs are ignored by Git.
+
+The release evidence establishes deterministic functional agreement for small
+synthetic serial and two-worker cases. It does not establish real cluster
+scaling, broad portability, or production reliability.
+
+## Optional MS-MPI source
+
+With the MS-MPI SDK installed and discoverable by CMake, an experimental target
+can be requested:
+
+```powershell
+cmake -S . -B build-msmpi -A x64 -DPARALLEL_LU_BUILD_MSMPI=ON
+cmake --build build-msmpi --config Release --target lu_mpi
 ```
 
-`lu_driver1.exe` can run locally as a serial baseline when no worker hosts are provided.
+That command is documented as an opt-in build route, not as verified release
+evidence. Running the program additionally requires the matching MS-MPI runtime.
 
-## Run the MPI implementation
+## Provenance and license
 
-```bat
-mpiexec -n 4 lu_mpi.exe 2000 --matrix rand --timing --verify --csv results.csv
-```
+This is Ali Farrokhnejad's original coursework/personal implementation, including
+shared logic developed from an earlier personal `lu_final.cpp`; no external or
+classroom starter code was incorporated. See [NOTICE.md](NOTICE.md).
 
-## Verification and diagnostics
-
-With `--verify`, the program reports residual information including `||Ax-b||∞`, `||b||∞`, and a relative residual. The implementation also checks for NaN/Inf values.
-
-With `--timing`, execution reports timing breakdowns for major phases such as pivot scanning, row swaps, communication, and elimination. `--csv` appends run data for later benchmark analysis.
-
-A weighted checksum of the first solved values is also emitted as a lightweight run-to-run validation signal.
-
-## Current boundaries
-
-- This is coursework rather than a production or maintained HPC library.
-- The codebase is Windows/MS-MPI oriented rather than cross-platform.
-- Dense storage and factorization remain `O(N²)` in memory footprint per relevant process allocation.
-- Benchmark results depend heavily on matrix size, process layout, network conditions, and OpenMP configuration, so this repository does not claim a universal speedup.
-- Correctness verification is implemented in the executables; a broader automated cross-platform CI/benchmark harness would be a useful future extension.
-
-## License
-
-Parallel-LU is released under the MIT License. See [`LICENSE`](LICENSE).
+The repository is licensed under the [MIT License](LICENSE).
